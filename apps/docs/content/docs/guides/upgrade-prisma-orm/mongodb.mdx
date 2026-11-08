@@ -341,6 +341,7 @@ What changes when you move a transaction over:
 - **Options.** `isolationLevel` and `maxWait` have no replacement. `timeout` maps most closely to `timeoutMS` in the optional second argument, which also takes `readConcern`, `writeConcern`, `readPreference`, `maxCommitTimeMS`, and `retry`. MongoDB aborts a transaction that is still open after 60 seconds by default, a limit the server's `transactionLifetimeLimitSeconds` parameter sets.
 - **The callback can run again.** The MongoDB driver runs the whole callback again after a temporary error such as a write conflict, so move emails and other side effects after the commit, or pass `retry: false` in the options to run it once.
 - **Built queries run on `tx`.** Inside the callback, run a pipeline-builder or raw query with `tx.query(plan)`, not `(await db.runtime()).query(plan)`, which runs outside the transaction.
+- **One query at a time.** MongoDB's Node.js driver does not support parallel operations in one transaction, so write the queries one after another with `await`, not in a `Promise.all`.
 
 </Added>
 

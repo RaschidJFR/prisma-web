@@ -14,7 +14,7 @@ If you are coming from Prisma ORM 7, your `schema.prisma` is now called `contrac
 
 <Added>
 
-Transactions work on MongoDB too, on a replica set or a sharded cluster. There, `tx` has fewer members, and the MongoDB driver can run the callback more than once. See [Transactions (MongoDB)](#transactions-mongodb).
+Transactions work on MongoDB too, on a replica set or a sharded cluster. There, `tx` has fewer members, and the MongoDB driver can run the callback more than once, unless you pass `retry: false`. See [Transactions (MongoDB)](#transactions-mongodb).
 
 </Added>
 
@@ -730,7 +730,7 @@ await connection.destroy();
 
 <Added inline>A transaction groups several writes into one unit, as on PostgreSQL. MongoDB runs transactions only on a replica set or a sharded cluster, and single-document writes are atomic on their own. The MongoDB runtime has no `connection()`, `prepare()`, or `telemetry()`: it has `query`, `execute`, `transaction`, and `close`.</Added> The reading rules under [`AsyncIterableResult`](#asynciterableresult) apply to MongoDB too.
 
-### `db.transaction(callback)` on MongoDB [#mongodb-transaction]
+### `db.transaction(callback, options)` on MongoDB [#mongodb-transaction]
 
 <Added>
 
@@ -743,8 +743,8 @@ Run a callback inside a MongoDB transaction. Available since `<VERSION>`. The tr
 - Query through `tx`, not `db`. <Added inline>`tx` has `orm`, `query`, and `execute`. `tx.orm` holds your models by collection name, as `db.orm` does. `tx.query(plan)` runs a built query and returns an [`AsyncIterableResult`](#asynciterableresult). `tx.execute(plan)` runs a built update or delete and resolves to `{ affectedRows }`. Build queries with `db.query`, the [pipeline builder](/orm/reference/pipeline-builder), which only builds and does not need the transaction. Queries on `db` run outside the transaction.</Added>
 - <Added inline>On the MongoDB client, `db.query` builds a query while `tx.query` runs one. This naming may change while MongoDB support is in preview.</Added>
 - <Added inline>`tx` has no `raw`. Build a raw command with `db.raw` and run it with `tx.query(plan)` or `tx.execute(plan)`.</Added>
-- <Added inline>The callback runs through the MongoDB driver's `ClientSession.withTransaction()`. The driver runs the whole callback again after an error labelled `TransientTransactionError`, such as a write conflict, and retries only the commit after an error labelled `UnknownTransactionCommitResult`. It gives up after 120 seconds, or after `timeoutMS` if you set one in the options or on the client, and throws the last error. The number of attempts cannot be set; a short `timeoutMS` limits it, and `retry: false` turns the retry off (since `<VERSION>`). Keep side effects out of the callback.</Added>
-- <Added inline>`db.transaction(callback, options)` takes an optional second argument, `options`, with the transaction's `readConcern`, `writeConcern`, `readPreference` (reads in a transaction must go to the primary), `maxCommitTimeMS`, `timeoutMS`, and `retry`. Since `<VERSION>`. Without it, the transaction uses the client's settings. MongoDB aborts a transaction still open after 60 seconds by default. The server's [`transactionLifetimeLimitSeconds`](https://www.mongodb.com/docs/manual/reference/parameters/#mongodb-parameter-param.transactionLifetimeLimitSeconds) parameter sets that limit.</Added>
+- <Added inline>The callback runs through the MongoDB driver's `ClientSession.withTransaction()`. The driver runs the whole callback again after an error labelled `TransientTransactionError`, such as a write conflict, and retries only the commit after an error labelled `UnknownTransactionCommitResult`. It gives up after 120 seconds, or after `timeoutMS` if you set one in the options or on the client, and throws the last error. The number of attempts cannot be set; a short `timeoutMS` limits it, and `retry: false` turns the retry off (since `<VERSION>`), though the driver still retries the commit alone after an unknown commit result. Keep side effects out of the callback.</Added>
+- <Added inline>`db.transaction(callback, options)` takes an optional second argument, `options`, with the transaction's `readConcern`, `writeConcern`, `readPreference` (reads in a transaction must go to the primary), `maxCommitTimeMS`, `timeoutMS`, and `retry`. Since `<VERSION>`. Without it, the transaction uses the client's settings. `timeoutMS` is a deadline for the whole transaction: when it passes, the next operation fails with a `MongoOperationTimeoutError`, the transaction is aborted, and the callback is not run again. MongoDB aborts a transaction still open after 60 seconds by default. The server's [`transactionLifetimeLimitSeconds`](https://www.mongodb.com/docs/manual/reference/parameters/#mongodb-parameter-param.transactionLifetimeLimitSeconds) parameter sets that limit.</Added>
 - <Added inline>On a standalone server, the first query in the callback rejects with [`DRIVER.TRANSACTIONS_UNSUPPORTED`](/orm/reference/error-reference#DRIVER.TRANSACTIONS_UNSUPPORTED), and nothing is written. MongoDB's own `MongoServerError`, `code` `20`, is on its `cause`.</Added>
 - <Added inline>An error your callback throws is rethrown unchanged. An error from MongoDB, such as a duplicate key, arrives as the driver's `MongoServerError`, with MongoDB's `code`, `11000` for a duplicate key.</Added>
 - `tx` has no `transaction()` method, so transactions do not nest. <Added inline>Type a helper's parameter as `MongoTransactionContext<Contract>`, imported from `@prisma/orm-mongo/runtime`.</Added>
@@ -787,6 +787,18 @@ const total = await db.transaction(async (tx) => {
   const [result] = await tx.query(db.query.from('users').count('total').build());
   return result?.total; // counts Ann before the commit
 });
+```
+
+##### Run the callback once with `retry: false`
+
+```typescript
+await db.transaction(
+  async (tx) => {
+    await tx.orm.users.create({ name: 'Ann', email: 'ann@prisma.io', role: 'author' });
+  },
+  { retry: false },
+);
+// a temporary error such as a write conflict reaches you; the callback does not run again
 ```
 
 ##### A result read after the transaction ends

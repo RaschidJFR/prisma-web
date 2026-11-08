@@ -49,7 +49,7 @@ The ORM client works the same on both databases. The lower-level query APIs foll
 
 <Added>
 
-`db.transaction()` works on both, on MongoDB since `<VERSION>`. On MongoDB it needs a replica set or a sharded cluster, and the MongoDB driver can run your callback more than once. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+`db.transaction()` works on both, on MongoDB since `<VERSION>`. On MongoDB it needs a replica set or a sharded cluster, and the MongoDB driver can run your callback more than once, unless you pass `retry: false`. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
 
 </Added>
 

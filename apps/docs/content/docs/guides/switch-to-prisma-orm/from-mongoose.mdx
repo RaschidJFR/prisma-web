@@ -601,7 +601,7 @@ In the pipeline builder, `.match((f) => f._id.eq(id))` sends the id as a plain s
 
 <Added>
 
-Since `<VERSION>`, Mongoose's `connection.transaction(async (session) => ...)` becomes `db.transaction(async (tx) => ...)`. Inside the callback, query through `tx.orm` instead of passing `{ session }` to each call. As with Mongoose, MongoDB runs transactions only on a replica set, and the driver can run the callback again after a temporary error such as a write conflict. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+Since `<VERSION>`, Mongoose's `connection.transaction(async (session) => ...)` becomes `db.transaction(async (tx) => ...)`. Inside the callback, query through `tx.orm` instead of passing `{ session }` to each call. As with Mongoose, MongoDB runs transactions only on a replica set, and the driver can run the callback again after a temporary error such as a write conflict, unless you pass `retry: false`. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
 
 </Added>
 
