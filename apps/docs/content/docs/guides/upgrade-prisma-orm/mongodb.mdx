@@ -20,7 +20,7 @@ Install the companion [prisma-mongodb-upgrade](https://github.com/prisma/skills/
 - **TypeScript 5.9+**
 - **MongoDB 8.0+**
 - **The mongodb node driver 7.x** as a peer dependency
-- **A replica set** if your app uses [transactions](/orm/fundamentals/transactions). The ORM API in Prisma ORM 8 doesn't wrap `$transaction` yet, so multi-document atomicity goes through the driver's sessions (see step 3d), which MongoDB only allows on a replica set.
+- **A replica set** if your app uses [transactions](/orm/fundamentals/transactions). <Added inline>`db.transaction(...)` replaces `$transaction` (see step 3d), and MongoDB only runs transactions on a replica set or a sharded cluster.</Added>
 
 :::info
 
@@ -307,36 +307,48 @@ const byKind = await (await db.runtime()).query(plan).toArray();
 
 ### 3d. Transactions
 
-Prisma ORM 8 has no `transaction` method for MongoDB yet. For multi-document transactions, use the `mongodb` driver's [Transaction API](https://www.mongodb.com/docs/drivers/node/current/crud/transactions/transaction-conv/).
+<Added>
+
+Since `<VERSION>`, replace `$transaction` with `db.transaction(...)`, and query through `tx.orm` inside the callback, by collection name as everywhere else.
+
+</Added>
 
 ```typescript tab="After"
-import { MongoClient } from 'mongodb';
+import { db } from './db';
 
-const client = new MongoClient(process.env['DATABASE_URL']!);
-const session = client.startSession();
-const mdb = client.db('my-app-db');
-
-try {
-  await session.withTransaction(async () => {
-    // Pass { session } to EVERY operation: an op without it silently
-    // runs outside the transaction.
-    await mdb
-      .collection('users')
-      .insertOne({ email: 'a@e.com', role: 'author' }, { session });
-    await mdb
-      .collection('posts')
-      .updateOne({ _id: postId }, { $set: { authorId } }, { session });
-  });
-} finally {
-  await session.endSession();
-}
+await db.transaction(async (tx) => {
+  const user = await tx.orm.users.create({ email: 'a@e.com', role: 'author' });
+  await tx.orm.posts.where({ id: postId }).update({ authorId: user.id });
+});
 ```
 
 ```typescript tab="Before"
 await prisma.$transaction(async (tx) => {
-  // ...writes...
+  const user = await tx.user.create({ data: { email: 'a@e.com', role: 'author' } });
+  await tx.post.update({ where: { id: postId }, data: { authorId: user.id } });
 });
 ```
+
+<Added>
+
+What changes when you move a transaction over:
+
+</Added>
+
+<Added>
+
+- **The array form goes away.** `prisma.$transaction([a, b])` becomes the same callback, with the queries written one after another.
+- **Options.** `isolationLevel` and `maxWait` have no replacement. `timeout` maps most closely to `timeoutMS` in the optional second argument, which also takes `readConcern`, `writeConcern`, `readPreference`, `maxCommitTimeMS`, and `retry`. MongoDB aborts a transaction that is still open after 60 seconds by default, a limit the server's `transactionLifetimeLimitSeconds` parameter sets.
+- **The callback can run again.** The MongoDB driver runs the whole callback again after a temporary error such as a write conflict, so move emails and other side effects after the commit, or pass `retry: false` in the options to run it once.
+- **Built queries run on `tx`.** Inside the callback, run a pipeline-builder or raw query with `tx.query(plan)`, not `(await db.runtime()).query(plan)`, which runs outside the transaction.
+
+</Added>
+
+<Added>
+
+[Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb) covers each of these.
+
+</Added>
 
 ### 3e. Raw operations
 
@@ -404,7 +416,7 @@ For raw reads and writes scoped to a single collection (anything the typed build
 | `aggregate` / `groupBy` | `db.query.from(...).group(...).build()` → `(await db.runtime()).query(plan)` |
 | `findRaw` / `aggregateRaw` | `db.raw.collection(...).aggregate(...).build()` → `(await db.runtime()).query(plan)`, or `db.query.rawCommand(...)` |
 | `$runCommandRaw` | share a `MongoClient` with the binding, then `mongoClient.db(...).command(...)` (see 3e) |
-| `$transaction(...)` | no wrapper yet. Use driver sessions on a replica set (see 3d) |
+| `$transaction(...)` | `db.transaction(async (tx) => ...)` on a replica set, querying through `tx.orm` (see 3d) |
 | `$connect` / `$disconnect` | connects lazily on first use. Call `db.close()` to disconnect |
 
 ## 4. Adopt the migration lifecycle
@@ -450,7 +462,7 @@ Work through this list before you switch production traffic over:
 - **Index parity.** The indexes on each collection (`db.collection.getIndexes()`) match your contract, names included.
 - **Validators.** Your existing documents pass the strict validators Prisma ORM 8 adds to each collection (see *Good to know* in step 4).
 - **Addressing.** Every call site uses storage names like `db.orm.users`, not model names.
-- **Transactions.** Every v6 `$transaction` now has a driver-session equivalent.
+- <Added inline>**Transactions.** Every v6 `$transaction` is now a `db.transaction(...)` callback that queries through `tx`, with its side effects moved after the commit.</Added>
 - **Raw calls.** Every `$runCommandRaw`, `findRaw`, and `aggregateRaw` has a pipeline-builder or `mongodb`-driver replacement.
 - **Read-only trial run.** Run Prisma ORM 8 read-only alongside your v6 app for a while and compare the results. This surfaces any differences while v6 is still handling all the writes.
 - **Cutover and rollback.** Switch writes over only once the trial run looks good, and keep the v6 branch deployable. Rolling back is just a code rollback since your data never moved.

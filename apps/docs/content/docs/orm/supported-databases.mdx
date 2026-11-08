@@ -42,12 +42,16 @@ The ORM client works the same on both databases. The lower-level query APIs foll
 | [SQL query builder](/orm/reference/sql-query-builder) | Yes | No |
 | [Pipeline builder](/orm/reference/pipeline-builder) | No | Yes |
 | [Raw queries](/orm/reference/raw-queries) | Raw SQL | Raw commands |
-| [Transactions](/orm/fundamentals/transactions) | Yes | Not yet |
+| [Transactions](/orm/fundamentals/transactions) | Yes | Yes, on a replica set or sharded cluster |
 | [Migrations](/orm/migrations/how-migrations-work) | Yes | Yes |
 | [Extensions](/orm/extensions) (pgvector, PostGIS, ParadeDB, and more) | Yes | Not yet |
 | [Middleware](/orm/middleware/how-middleware-works) | Yes | Yes, except `beforeCompile` |
 
-`db.transaction()` exists on the PostgreSQL client only, because Prisma ORM does not support MongoDB transactions yet. For multi-document writes on MongoDB, [use the MongoDB driver's session API](/orm/fundamentals/transactions#transactions-on-mongodb) alongside the client.
+<Added>
+
+`db.transaction()` works on both, on MongoDB since `<VERSION>`. On MongoDB it needs a replica set or a sharded cluster, and the MongoDB driver can run your callback more than once. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+
+</Added>
 
 Middleware hooks are the same on both databases apart from `beforeCompile`, which rewrites the SQL query before it runs and so exists only on PostgreSQL. The built-in `lints` and `budgets` middleware inspect SQL and run on PostgreSQL. The `cache` middleware runs on both. See [which databases a middleware runs on](/orm/middleware/how-middleware-works#which-databases-a-middleware-runs-on).
 

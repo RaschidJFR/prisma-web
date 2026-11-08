@@ -597,9 +597,13 @@ In the pipeline builder, `.match((f) => f._id.eq(id))` sends the id as a plain s
 
 :::
 
-:::warning[No transactions on MongoDB yet]
+:::info[Transactions]
 
-The MongoDB client has no `db.transaction(...)`. For multi-document atomicity, pass your own `MongoClient` to `mongo({ contract, mongoClient, dbName })` and use the driver's `session.withTransaction(...)`, as shown in the [transactions](/orm/fundamentals/transactions) docs.
+<Added>
+
+Since `<VERSION>`, Mongoose's `connection.transaction(async (session) => ...)` becomes `db.transaction(async (tx) => ...)`. Inside the callback, query through `tx.orm` instead of passing `{ session }` to each call. As with Mongoose, MongoDB runs transactions only on a replica set, and the driver can run the callback again after a temporary error such as a write conflict. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+
+</Added>
 
 :::
 

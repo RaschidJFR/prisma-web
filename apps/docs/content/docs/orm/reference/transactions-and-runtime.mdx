@@ -12,7 +12,11 @@ If you are coming from Prisma ORM 7, your `schema.prisma` is now called `contrac
 
 `db` is the client that `postgres(...)` or `mongo(...)` returns. `db.runtime()` gives you the object that actually runs queries, and that object is called the runtime.
 
-Transactions are not available on MongoDB. To run one there, pass your own `MongoClient` with the `mongoClient` option and use the driver's `session.withTransaction(...)`, which [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb) shows in code.
+<Added>
+
+Transactions work on MongoDB too, on a replica set or a sharded cluster. There, `tx` has fewer members, and the MongoDB driver can run the callback more than once. See [Transactions (MongoDB)](#transactions-mongodb).
+
+</Added>
 
 ## Client lifecycle on PostgreSQL
 
@@ -346,6 +350,7 @@ Create a MongoDB client.
 - Tell the client which database to use in one of four ways: `url`, `uri`, `mongoClient`, or `binding`. A `binding` wraps the choices in one object, with a `kind` field saying which it is: `{ kind: 'url', url, dbName }` or `{ kind: 'mongoClient', client, dbName }`. Use it when your code picks the source at run time, and use the `url` kind for a `uri`. Pass exactly one of the four, or leave all four out and pass one to [MongoDB `connect()`](#connect-1). `dbName` is separate and does not count as one of the four, so `{ url, dbName }` is allowed.
 - With `url`, the database name comes from the path of the connection string, as in `mongodb://host:27017/app`. Add `dbName` to override that name, or when the string has no name in its path. `uri` takes the same kind of string, and always needs `dbName`.
 - **Client ownership**: with `url` or `uri`, Prisma ORM creates the underlying `MongoClient` and closes it on `close()`. With `mongoClient`, you supplied the client, so Prisma ORM does **not** close it. Because `close()` leaves your client open, you can use one `MongoClient` both through Prisma ORM and in code you write against the `mongodb` package directly. You close that client yourself.
+- <Added inline>Settings for the underlying `MongoClient` go in the connection string with `url` or `uri`, or on the `MongoClient` you create and pass as `mongoClient`. Among them, `timeoutMS`, `w`, and `readConcernLevel` apply to every [transaction](#mongodb-transaction), unless a transaction's options override them.</Added>
 - `mongo(options)` does not open a connection. The runtime is built on first use, or explicitly via [MongoDB `connect()`](#connect-1).
 - A contract built with extension packs records them under `extensions` in `contract.json`, so pass the runtime of each pack the contract records to the `extensions` option, as on PostgreSQL: `mongo({ contract, url, extensions: [myPack] })`, with `myPack` imported from the pack's `/runtime` subpath. When a pack the contract needs is missing, `mongo(...)` throws an error whose `code` is `RUNTIME.MISSING_EXTENSION_PACK`.
 
@@ -723,9 +728,76 @@ await connection.destroy();
 
 ## Transactions (MongoDB)
 
-:::note[MongoDB transactions are not available in Prisma ORM yet]
-There is no `db.transaction(...)` on the MongoDB client, and the MongoDB runtime has no `connection()`, `prepare()`, or `telemetry()`: it has `query`, `execute`, and `close` and nothing else. Single-document write operations are atomic on their own, while multi-document transactions through Prisma ORM are planned, not shipped. To run one today, create your own `MongoClient`, pass it as the `mongoClient` option when you create the client, and group the writes in `session.withTransaction(...)`, as the [Fundamentals transactions guide](/orm/fundamentals/transactions#transactions-on-mongodb) shows. The reading rules under [`AsyncIterableResult`](#asynciterableresult) apply to MongoDB too.
-:::
+<Added inline>A transaction groups several writes into one unit, as on PostgreSQL. MongoDB runs transactions only on a replica set or a sharded cluster, and single-document writes are atomic on their own. The MongoDB runtime has no `connection()`, `prepare()`, or `telemetry()`: it has `query`, `execute`, `transaction`, and `close`.</Added> The reading rules under [`AsyncIterableResult`](#asynciterableresult) apply to MongoDB too.
+
+### `db.transaction(callback)` on MongoDB [#mongodb-transaction]
+
+<Added>
+
+Run a callback inside a MongoDB transaction. Available since `<VERSION>`. The transaction commits when the callback returns and aborts when it throws.
+
+</Added>
+
+#### Remarks
+
+- Query through `tx`, not `db`. <Added inline>`tx` has `orm`, `query`, and `execute`. `tx.orm` holds your models by collection name, as `db.orm` does. `tx.query(plan)` runs a built query and returns an [`AsyncIterableResult`](#asynciterableresult). `tx.execute(plan)` runs a built update or delete and resolves to `{ affectedRows }`. Build queries with `db.query`, the [pipeline builder](/orm/reference/pipeline-builder), which only builds and does not need the transaction. Queries on `db` run outside the transaction.</Added>
+- <Added inline>On the MongoDB client, `db.query` builds a query while `tx.query` runs one. This naming may change while MongoDB support is in preview.</Added>
+- <Added inline>`tx` has no `raw`. Build a raw command with `db.raw` and run it with `tx.query(plan)` or `tx.execute(plan)`.</Added>
+- <Added inline>The callback runs through the MongoDB driver's `ClientSession.withTransaction()`. The driver runs the whole callback again after an error labelled `TransientTransactionError`, such as a write conflict, and retries only the commit after an error labelled `UnknownTransactionCommitResult`. It gives up after 120 seconds, or after `timeoutMS` if you set one in the options or on the client, and throws the last error. The number of attempts cannot be set; a short `timeoutMS` limits it, and `retry: false` turns the retry off (since `<VERSION>`). Keep side effects out of the callback.</Added>
+- <Added inline>`db.transaction(callback, options)` takes an optional second argument, `options`, with the transaction's `readConcern`, `writeConcern`, `readPreference` (reads in a transaction must go to the primary), `maxCommitTimeMS`, `timeoutMS`, and `retry`. Since `<VERSION>`. Without it, the transaction uses the client's settings. MongoDB aborts a transaction still open after 60 seconds by default. The server's [`transactionLifetimeLimitSeconds`](https://www.mongodb.com/docs/manual/reference/parameters/#mongodb-parameter-param.transactionLifetimeLimitSeconds) parameter sets that limit.</Added>
+- <Added inline>On a standalone server, the first query in the callback rejects with [`DRIVER.TRANSACTIONS_UNSUPPORTED`](/orm/reference/error-reference#DRIVER.TRANSACTIONS_UNSUPPORTED), and nothing is written. MongoDB's own `MongoServerError`, `code` `20`, is on its `cause`.</Added>
+- <Added inline>An error your callback throws is rethrown unchanged. An error from MongoDB, such as a duplicate key, arrives as the driver's `MongoServerError`, with MongoDB's `code`, `11000` for a duplicate key.</Added>
+- `tx` has no `transaction()` method, so transactions do not nest. <Added inline>Type a helper's parameter as `MongoTransactionContext<Contract>`, imported from `@prisma/orm-mongo/runtime`.</Added>
+- <Added inline>Each call to `db.transaction(...)` opens its own session, so separate calls can run at the same time. The queries inside one callback must run one after another, because MongoDB's Node.js driver does not support parallel operations in one transaction. Parallel first queries, such as a `Promise.all` at the start of the callback, reject with a `MongoServerError` whose `code` is `117` (`ConflictingOperationInProgress`), and the transaction is aborted without a retry.</Added>
+- <Added inline>Reads inside the transaction see the transaction's own writes, and reads on `db` don't see them until it commits.</Added>
+- <Added inline>A call on `tx` after the transaction has ended, or a result created inside it and read later, rejects with an error whose `code` is `RUNTIME.TRANSACTION_CLOSED`.</Added>
+- <Added inline>On a closed client, `db.transaction(...)` rejects with `DRIVER.NOT_CONNECTED` and does not connect.</Added>
+- <Added inline>To put a time limit on the queries inside a transaction, pass a `signal` to each `tx.query(...)` and `tx.execute(...)` call.</Added> See [`RuntimeExecuteOptions`](#runtimeexecuteoptions).
+
+#### Options
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `callback` | `(tx) => Promise<R>` | Yes | The transactional work. `tx` exposes `orm`, `query`, and `execute`. The driver can call it more than once, unless `retry` is `false`. |
+| `options` | `{ readConcern?, writeConcern?, readPreference?, maxCommitTimeMS?, timeoutMS?, retry? }` | No | The transaction's settings, applied to this transaction only. `retry` is `true` by default; with `false`, the callback runs once and a temporary error reaches you. |
+
+#### Return type
+
+| Return type | Example | Description |
+|---|---|---|
+| `Promise<R>` | `await db.transaction(async (tx) => ...)` | What the last run of the callback returned. |
+
+#### Examples
+
+##### Commit several writes atomically on MongoDB
+
+```typescript
+await db.transaction(async (tx) => {
+  await tx.orm.users.create({ name: 'Ann', email: 'ann@prisma.io', role: 'author' });
+  await tx.orm.users.create({ name: 'Bob', email: 'bob@prisma.io', role: 'reader' });
+});
+// both users exist now
+```
+
+##### Run a pipeline-builder query inside the transaction
+
+```typescript
+const total = await db.transaction(async (tx) => {
+  await tx.orm.users.create({ name: 'Ann', email: 'ann@prisma.io', role: 'author' });
+  const [result] = await tx.query(db.query.from('users').count('total').build());
+  return result?.total; // counts Ann before the commit
+});
+```
+
+##### A result read after the transaction ends
+
+```typescript
+let pending;
+await db.transaction(async (tx) => {
+  pending = tx.orm.users.all(); // not awaited inside the callback
+});
+await pending; // rejects with RUNTIME.TRANSACTION_CLOSED
+```
 
 ## Prepared statements (PostgreSQL)
 
