@@ -1,8 +1,10 @@
 import defaultMdxComponents from "fumadocs-ui/mdx";
 import { Youtube } from "@prisma-docs/ui/components/youtube";
+import { Added } from "@/components/added";
 import { APIPage } from "@/components/api-page";
 import { ConceptAnimation } from "@/components/concept-animation";
 import { DatabaseCodeTabs } from "@/components/database-code-tabs";
+import { Removed } from "@/components/removed";
 import { DeployButtonGenerator } from "@/components/deploy-button-generator";
 import {
   AgentPrompt,
@@ -120,6 +122,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     CodeBlockTab,
     Accordion,
     Accordions,
+    Added,
     APIPage,
     AgentPrompt,
     // Same custom bucket the sidebar's Storage entry uses (lucide has none).
@@ -130,6 +133,7 @@ export function getMDXComponents(components?: MDXComponents): MDXComponents {
     IconGrid,
     IconLink,
     ModalRow,
+    Removed,
     SectionRow,
     TechIcon,
     WorkflowGrid,

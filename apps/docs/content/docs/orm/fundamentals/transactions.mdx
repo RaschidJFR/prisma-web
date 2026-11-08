@@ -3,18 +3,18 @@ title: Transactions
 description: Run several writes so they all succeed or all fail together with db.transaction().
 url: /orm/fundamentals/transactions
 metaTitle: Transactions in Prisma ORM
-metaDescription: 'Group writes atomically with db.transaction() on PostgreSQL, and run multi-document MongoDB transactions with the MongoDB driver.'
+metaDescription: 'Group writes atomically with db.transaction() on PostgreSQL, SQLite, and MongoDB, and learn how MongoDB transactions differ: replica sets, retried callbacks, and the members of tx.'
 ---
 
 Run several writes as one unit with `db.transaction(...)`: they all commit together, or they all roll back.
 
-Prisma ORM 8 runs on PostgreSQL, SQLite, and MongoDB. MySQL is an early preview that reads data, and its `db.transaction(...)` runs reads and raw SQL. The examples on this page are PostgreSQL; `db.transaction(...)` works the same way on SQLite, and MongoDB is covered in [Transactions on MongoDB](#transactions-on-mongodb).
+Prisma ORM 8 runs on PostgreSQL, SQLite, and MongoDB. MySQL is an early preview that reads data, and its `db.transaction(...)` runs reads and raw SQL. <Added inline>`db.transaction(...)` works the same way on SQLite as on PostgreSQL. Since `<VERSION>`, it works on MongoDB too, on a replica set or a sharded cluster. Each section below shows PostgreSQL and MongoDB side by side and says where they differ, and [Transactions on MongoDB](#transactions-on-mongodb) covers what applies to MongoDB only.</Added>
 
 ## Run writes in a transaction
 
 Use a transaction whenever one business operation spans more than one write: creating a user with their first records, moving a value between two rows, or deleting a parent after its children. Pass a callback to `db.transaction(...)`, and inside it, query through `tx` instead of `db`. Every query you make on `tx` runs inside the transaction, and `db.transaction(...)` returns whatever your callback returns:
 
-```typescript
+```typescript tab="PostgreSQL"
 import { db } from "./prisma/db";
 const result = await db.transaction(async (tx) => {
   const user = await tx.orm.public.User.create({ email: "jane@prisma.io", name: "Jane" });
@@ -23,17 +23,74 @@ const result = await db.transaction(async (tx) => {
 });
 ```
 
+```typescript tab="MongoDB"
+import { db } from "./prisma/db";
+const result = await db.transaction(async (tx) => {
+  const user = await tx.orm.users.create({ email: "jane@prisma.io", name: "Jane" });
+  const post = await tx.orm.posts.create({ title: "Hello", published: false, authorId: user.id });
+  return { userId: user.id, postId: post.id }; // both documents exist once this returns
+});
+```
+
 `tx` has the same query members as `db`. `tx.orm` is the model API, what `prisma.user` was in Prisma ORM 7, and `tx.sql` is the SQL query builder. `tx` also has `raw` for raw SQL, `query` and `execute` to run a query you built, and `prepare` for a statement you run many times with different values.
+
+<Added>
+
+On MongoDB, `tx` has `orm`, `query`, and `execute`, and no `sql`, `raw`, or `prepare`. `tx.query(plan)` and `tx.execute(plan)` run a query you built, as on PostgreSQL, and you build it with `db.query` or `db.raw`, as [Use the pipeline builder in a transaction](#use-the-sql-builder-in-a-transaction) shows.
+
+</Added>
+
+<Added>
+
+Await every query inside the callback. Once the callback returns, `tx` stops working: a call on `tx` after that, or a query result you kept in a variable outside the callback and read later, rejects with [`RUNTIME.TRANSACTION_CLOSED`](/orm/reference/error-reference#RUNTIME.TRANSACTION_CLOSED).
+
+</Added>
 
 `db` is the client you create once in `src/prisma/db.ts`, and `prisma orm init` writes that file for you. It writes the file once; it is your code, so edit it freely. Under `tx.orm.public`, the property name is the model name, so `User` and `Post` are spelled exactly as you spelled them in your contract.
 
 `public` is the PostgreSQL schema, the namespace your tables live in, which is `public` unless you set one. `create(...)` takes the fields of the record directly, with no `data:` wrapper: pass a field if it is required and has no default, while everything else is optional, and [Write data](/orm/fundamentals/writing-data) has the full rules. You don't need a transaction for a single write; every mutation is already atomic on its own.
 
+On MongoDB there is no schema segment in the path, and the property name is the collection name: the model's `@@map` value, or the model name exactly as written when the model has no `@@map`. <Added inline>The MongoDB examples on this page assume the two models below, so Prisma ORM reads them as `tx.orm.users` and `tx.orm.posts`. Without the `@@map` lines they would be `tx.orm.User` and `tx.orm.Post`.</Added>
+
+```prisma title="src/prisma/contract.prisma" tab="PostgreSQL"
+model User {
+  id    String  @id @default(uuid())
+  email String  @unique
+  name  String?
+}
+
+model Post {
+  id        String  @id @default(uuid())
+  title     String
+  published Boolean
+  authorId  String
+  createdAt DateTime @default(now())
+}
+```
+
+```prisma title="src/prisma/contract.prisma" tab="MongoDB"
+model User {
+  id    ObjectId @id @map("_id")
+  email String   @unique
+  name  String?
+  @@map("users")
+}
+
+model Post {
+  id        ObjectId @id @map("_id")
+  title     String
+  published Boolean
+  authorId  ObjectId
+  createdAt DateTime @default(now())
+  @@map("posts")
+}
+```
+
 ### Read inside a transaction
 
-Reads work the same way as writes: query through `tx.orm` and you see the rows the transaction has already written. `.first()` returns `null` when nothing matches.
+Reads work the same way as writes: query through `tx.orm` and you see the rows the transaction has already written. `.first()` returns `null` when nothing matches. <Added inline>Queries on `db` don't see those writes until the transaction commits, on both databases.</Added>
 
-```typescript
+```typescript tab="PostgreSQL"
 await db.transaction(async (tx) => {
   await tx.orm.public.User.create({ email: "jane@prisma.io", name: "Jane" });
   const jane = await tx.orm.public.User.where({ email: "jane@prisma.io" }).first();
@@ -41,12 +98,22 @@ await db.transaction(async (tx) => {
 });
 ```
 
+```typescript tab="MongoDB"
+await db.transaction(async (tx) => {
+  await tx.orm.users.create({ email: "jane@prisma.io", name: "Jane" });
+  const jane = await tx.orm.users.where({ email: "jane@prisma.io" }).first();
+  // jane is the document created a line earlier, before the transaction commits
+});
+```
+
 ### Pass tx to your helper functions
 
 A helper that runs inside the caller's transaction takes `tx` as a parameter:
 
-```typescript
-import { db, type Tx } from "./prisma/db";
+```typescript tab="PostgreSQL"
+import { db } from "./prisma/db";
+Type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 async function createWelcomePost(tx: Tx, authorId: string) {
   return tx.orm.public.Post.create({ title: "Welcome", published: false, authorId });
 }
@@ -56,14 +123,31 @@ await db.transaction(async (tx) => {
 });
 ```
 
-Prisma ORM does not export a type for `tx`, so add this line to `src/prisma/db.ts`: `export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];`, then import `Tx` wherever a helper needs it.
-Do not open a second transaction inside the helper, because calling `db.transaction(...)` again inside a callback does not nest: the inner call is a separate transaction that commits or rolls back on its own, and the outer one cannot roll it back. Pass `tx` down instead.
+```typescript tab="MongoDB"
+import type { MongoTransactionContext } from "@prisma/orm-mongo/runtime";
+import type { Contract } from "./prisma/contract.d";
+import { db } from "./prisma/db";
+
+async function createWelcomePost(tx: MongoTransactionContext<Contract>, authorId: string) {
+  return tx.orm.posts.create({ title: "Welcome", published: false, authorId });
+}
+await db.transaction(async (tx) => {
+  const user = await tx.orm.users.create({ email: "jane@prisma.io", name: "Jane" });
+  await createWelcomePost(tx, user.id);
+});
+```
+
+<Added>
+
+On PostgreSQL, Prisma ORM does not export a type for `tx`, so add this line to `src/prisma/db.ts`: `export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];`, then import `Tx` wherever a helper needs it.
+
+</Added>
 
 ### Options and isolation level
 
 `db.transaction(...)` takes the callback and nothing else. There are no `isolationLevel`, `timeout`, or `maxWait` options; see [what is not available yet](/orm/coming-from-prisma-orm-7#not-available-yet). Every transaction runs at the database's default isolation level, `READ COMMITTED` on PostgreSQL, and you cannot ask for another level yet. If you need one, set it yourself as the first statement in the callback:
 
-```typescript
+```typescript tab="PostgreSQL"
 await db.transaction(async (tx) => {
   await tx.execute(db.raw.sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`.affectedCount().build());
   // your writes
@@ -72,11 +156,48 @@ await db.transaction(async (tx) => {
 
 There is no transaction timeout either, so a transaction stays open for as long as your callback runs. If you need a limit, set PostgreSQL's `idle_in_transaction_session_timeout` on the connection (`transaction_timeout` on PostgreSQL 17 and later).
 
+<Added>
+
+Since `<VERSION>`, on MongoDB `db.transaction(...)` takes an optional second argument with the transaction's settings:
+
+</Added>
+
+```typescript tab="MongoDB"
+await db.transaction(
+  async (tx) => {
+    // your writes
+  },
+  { readConcern: { level: "majority" }, writeConcern: { w: "majority" }, timeoutMS: 10_000 },
+);
+```
+
+<Added>
+
+- `readConcern` and `writeConcern`: the [read concern](https://www.mongodb.com/docs/manual/reference/read-concern/) and [write concern](https://www.mongodb.com/docs/manual/reference/write-concern/) for this transaction.
+- `readPreference`: reads in a transaction must go to the primary, so the only accepted value is `primary`.
+- `maxCommitTimeMS`: how long the commit may run on the server.
+- `timeoutMS`: a deadline for the whole transaction, counted from its start. When it passes, the next operation fails with a `MongoOperationTimeoutError`, the transaction is aborted, and the callback is not run again. It also caps how long the driver keeps retrying. Without it, the driver stops retrying after 120 seconds. With `retry: false` it only limits the transaction's own operations.
+- `retry`: `true` by default. With `false`, your callback runs once: a temporary error such as a write conflict reaches you instead of triggering a re-run, and the transaction is aborted. See [Your callback can run more than once](#your-callback-can-run-more-than-once).
+
+</Added>
+
+<Added>
+
+You can also set these on the client, and they then apply to every transaction: put them in the connection string, as in `?w=majority&readConcernLevel=majority&timeoutMS=10000`, or, when you pass `mongoClient`, create the `MongoClient` with them. An option in the second argument overrides the client's for that transaction. Setting `timeoutMS` on the client works today; the second argument is new in `<VERSION>`. PostgreSQL's `db.transaction(...)` has no second argument.
+
+</Added>
+
+<Added>
+
+MongoDB's `timeoutMS` only limits the client side. The server aborts a transaction that is still open after 60 seconds by default, and the driver may then [run your callback again](#your-callback-can-run-more-than-once). The limit is the server's [`transactionLifetimeLimitSeconds`](https://www.mongodb.com/docs/manual/reference/parameters/#mongodb-parameter-param.transactionLifetimeLimitSeconds) parameter: on MongoDB Atlas, change it under [Set Transaction Lifetime](https://www.mongodb.com/docs/atlas/cluster-additional-settings/#set-transaction-lifetime), and on a self-managed server, set it with `setParameter`. A longer limit lets open transactions hold more of the server's cache, so keep transactions short and raise it only when you need to.
+
+</Added>
+
 ## Roll back on errors
 
 The transaction commits when the callback returns and rolls back when it throws, so nothing inside the callback survives an error:
 
-```typescript
+```typescript tab="PostgreSQL"
 try {
   await db.transaction(async (tx) => {
     await tx.orm.public.User.create({ email: "ghost@prisma.io", name: "Ghost" });
@@ -87,11 +208,56 @@ try {
 }
 ```
 
+```typescript tab="MongoDB"
+try {
+  await db.transaction(async (tx) => {
+    await tx.orm.users.create({ email: "ghost@prisma.io", name: "Ghost" });
+    throw new Error("boom");
+  });
+} catch {
+  // The user document was rolled back and does not exist
+}
+```
+
+<Added>
+
+On both databases, `db.transaction(...)` rejects with the error your callback threw, unchanged. An error from the database arrives with the database's own error code: a `sqlState` property on PostgreSQL, such as `23505` for a unique violation, and the MongoDB driver's `MongoServerError` with its `code` on MongoDB, such as `11000` for a duplicate key:
+
+</Added>
+
+```typescript tab="PostgreSQL"
+try {
+  await db.transaction(async (tx) => {
+    await tx.orm.public.User.create({ email: "ann@prisma.io", name: "Ann" });
+    await tx.orm.public.User.create({ email: "jane@prisma.io", name: "Jane" }); // jane@prisma.io already exists
+  });
+} catch (error) {
+  // Ann was rolled back too
+  if (typeof error === "object" && error && "sqlState" in error && error.sqlState === "23505") {
+    // the email is taken
+  }
+}
+```
+
+```typescript tab="MongoDB"
+try {
+  await db.transaction(async (tx) => {
+    await tx.orm.users.create({ email: "ann@prisma.io", name: "Ann" });
+    await tx.orm.users.create({ email: "jane@prisma.io", name: "Jane" }); // jane@prisma.io already exists
+  });
+} catch (error) {
+  // Ann was rolled back too
+  if (error instanceof Error && "code" in error && error.code === 11000) {
+    // the email is taken
+  }
+}
+```
+
 ### Write conflicts
 
-When PostgreSQL cannot commit your transaction because another transaction touched the same rows, it aborts yours. Errors from the database arrive with a `sqlState` property holding the PostgreSQL error code (`40001` for a serialization failure, when two transactions changed the same rows and one had to give way; `40P01` for a deadlock). When the conflict surfaces at commit, the error you catch has the code `RUNTIME.TRANSACTION_COMMIT_FAILED` and the database error sits on its `cause`. There is no exported error class to check with `instanceof`, so test for the property, on the error and on its `cause`. Prisma ORM does not retry write conflicts for you, so write the retry yourself around the `db.transaction(...)` call:
+When PostgreSQL cannot commit your transaction because another transaction touched the same rows, it aborts yours. Errors from the database arrive with a `sqlState` property holding the PostgreSQL error code (`40001` for a serialization failure, when two transactions changed the same rows and one had to give way; `40P01` for a deadlock). When the conflict surfaces at commit, the error you catch has the code `RUNTIME.TRANSACTION_COMMIT_FAILED` and the database error sits on its `cause`. There is no exported error class to check with `instanceof`, so test for the property, on the error and on its `cause`. <Added inline>Prisma ORM does not retry write conflicts for you on PostgreSQL, so write the retry yourself around the `db.transaction(...)` call:</Added>
 
-```typescript
+```typescript tab="PostgreSQL"
 async function withRetry<T>(run: () => Promise<T>, attempts = 3): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -106,16 +272,76 @@ async function withRetry<T>(run: () => Promise<T>, attempts = 3): Promise<T> {
 await withRetry(() => db.transaction(async (tx) => { /* your writes */ }));
 ```
 
-## Use the SQL builder in a transaction
+```typescript tab="MongoDB"
+import { MongoError } from "mongodb";
+
+async function withRetry<T>(run: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const transient = error instanceof MongoError && error.hasErrorLabel("TransientTransactionError");
+      if (!transient || attempt === attempts) throw error;
+    }
+  }
+}
+await withRetry(() => db.transaction(async (tx) => { /* your writes */ }, { retry: false }));
+```
+
+<Added>
+
+On MongoDB you don't need this retry by default, because the MongoDB driver retries for you. With `retry: false` you write it yourself, as the MongoDB example above shows, and you check MongoDB's `TransientTransactionError` label instead of `sqlState`. You can't cap the number of attempts, but you can turn the retry off with `retry: false`, as [shown below](#your-callback-can-run-more-than-once). Otherwise the one setting is the deadline: the driver retries until `timeoutMS` has passed, or for 120 seconds when you set none, pausing for a short random time between attempts (at most half a second). A short `timeoutMS`, set in the connection string, on your `MongoClient`, or in the [transaction options](#options-and-isolation-level), limits the retries.
+
+</Added>
+
+### Your callback can run more than once [#your-callback-can-run-more-than-once]
+
+<Added>
+
+On MongoDB, `db.transaction(...)` runs your callback through the MongoDB driver's [`withTransaction()`](https://www.mongodb.com/docs/drivers/node/current/crud/transactions/transaction-conv/), which retries in two cases:
+
+</Added>
+
+<Added>
+
+- When MongoDB reports a temporary error, one labelled `TransientTransactionError`, the driver aborts the attempt and runs your whole callback again in a new transaction. A write conflict with another transaction and a replica set election both cause one.
+- When the outcome of the commit is unknown, labelled `UnknownTransactionCommitResult`, for example after a network error, the driver retries only the commit, and your callback does not run again.
+
+</Added>
+
+<Added>
+
+The driver keeps retrying for up to 120 seconds, or for `timeoutMS` if you set one in the transaction options or on the client, and then throws the last error. `db.transaction(...)` resolves to what the last run of the callback returned. Nothing retries on PostgreSQL, so code that is safe there can misbehave on MongoDB: keep side effects such as emails and calls to other services [out of the callback](#side-effects-inside-the-callback), and don't change state outside the callback in a way that a second run would repeat.
+
+</Added>
+
+## Use a query builder in a transaction [#use-the-sql-builder-in-a-transaction]
 
 The [SQL query builder](/orm/fundamentals/advanced-queries) works the same way inside a transaction. `tx.sql` has the methods `db.sql` has, and you run the finished query with `tx.execute(...)`:
 
-```typescript
+<Added>
+
+On MongoDB the [pipeline builder](/orm/fundamentals/advanced-queries#mongodb-pipeline-builder) takes the place of the SQL builder, and a [raw command](/orm/reference/raw-queries#mongodb-raw-commands) covers writes it has no method for. `tx` has no builder of its own: build the query on `db`, with `db.query` or `db.raw`, which only build and do not need the transaction, then run it on `tx`. `tx.execute(...)` runs a write and resolves to `{ affectedRows }`, and `tx.query(...)` runs a read and resolves to the matching documents. Outside a transaction you run a built query with `(await db.runtime()).query(plan)`.
+
+</Added>
+
+```typescript tab="PostgreSQL"
 const cutoff = new Date("2026-01-01T00:00:00Z");
 await db.transaction(async (tx) => {
   const query = tx.sql.public.Post
     .update({ published: false })
     .where((f, fns) => fns.lt(f.createdAt, cutoff))
+    .build();
+  await tx.execute(query);
+});
+```
+
+```typescript tab="MongoDB"
+const cutoff = new Date("2026-01-01T00:00:00Z");
+await db.transaction(async (tx) => {
+  const query = db.raw
+    .collection("posts")
+    .updateMany({ createdAt: { $lt: cutoff } }, { $set: { published: false } })
     .build();
   await tx.execute(query);
 });
@@ -127,7 +353,7 @@ The other difference from `tx.orm` is that you chain clauses and then call `.bui
 
 To read rows, build a `SELECT` on `tx.sql` the same way and run it with `tx.query(...)`, which resolves to an array of rows:
 
-```typescript title="src/read-posts.ts"
+```typescript title="src/read-posts.ts" tab="PostgreSQL"
 await db.transaction(async (tx) => {
   const query = tx.sql.public.Post
     .select("id", "title")
@@ -138,13 +364,45 @@ await db.transaction(async (tx) => {
 });
 ```
 
+```typescript title="src/read-posts.ts" tab="MongoDB"
+await db.transaction(async (tx) => {
+  const query = db.query
+    .from("posts")
+    .match((f) => f.published.eq(false))
+    .project("title") // keeps _id too, like selecting id and title
+    .limit(10)
+    .build();
+  const drafts = await tx.query(query);
+});
+```
+
+<Added>
+
+On the MongoDB client, `db.query` builds a query while `tx.query` runs one; on PostgreSQL both run one. This naming may change while MongoDB support is in preview.
+
+</Added>
+
 ## Transactions on MongoDB
 
-Prisma ORM does not support MongoDB transactions yet: there is no `db.transaction(...)` on the MongoDB client. To run a multi-document transaction today, use the MongoDB driver directly: share one `MongoClient` between Prisma ORM and your code, and group the writes in a driver session.
-MongoDB only runs transactions on a replica set, and a standalone server rejects them. To turn a standalone server into a single-member replica set, follow the MongoDB guide on [converting a standalone to a replica set](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
+<Added>
+
+These apply to MongoDB only:
+
+- **A replica set or a sharded cluster.** MongoDB Atlas always runs one. On a standalone `mongod`, the callback's first query fails with [`DRIVER.TRANSACTIONS_UNSUPPORTED`](/orm/reference/error-reference#DRIVER.TRANSACTIONS_UNSUPPORTED), with MongoDB's own error (`code` `20`) on its `cause`. Nothing is written, but code the callback ran before that query has already run. For local development, run a single-member replica set, or [convert a standalone server](https://www.mongodb.com/docs/manual/tutorial/convert-standalone-to-replica-set/).
+- **One query at a time.** MongoDB's Node.js driver does not support parallel operations in one transaction, so `await` each call on `tx` before the next. A `Promise.all` at the start of the callback fails with a `MongoServerError` whose `code` is `117` (`ConflictingOperationInProgress`), and the transaction is aborted without a retry. Parallel calls later in a transaction can appear to work, but the driver does not support them. Separate `db.transaction(...)` calls can run at the same time.
+- **Migrations don't run in a transaction.** On MongoDB, `db migrate` has no transaction to roll back. Read [When something goes wrong](/orm/migrations/applying-a-migration#when-something-goes-wrong) before you run it again after a failure.
+- **MongoDB's own limits** on what a transaction can do, such as its size and the operations it allows. See MongoDB's [production considerations for transactions](https://www.mongodb.com/docs/manual/core/transactions-production-consideration/).
+
+</Added>
+
+<Removed>
+
+### Run a transaction with the MongoDB driver
+
+<Added inline>Use the driver's own sessions when you need something `db.transaction(...)` does not offer, such as an operation Prisma ORM has no API for. Prisma ORM queries cannot join a driver session, so every write that must be in the transaction goes through the driver. Share one `MongoClient` between Prisma ORM and your code, and group the writes in a driver session.</Added>
 Install `@prisma/orm-mongo`, which a MongoDB project already has, together with version 7 of the `mongodb` driver:
 
-```npm
+```npm tab="MongoDB"
 npm install @prisma/orm-mongo mongodb@7
 ```
 
@@ -152,7 +410,7 @@ npm install @prisma/orm-mongo mongodb@7
 
 Run `npx prisma contract emit` once first; `db.ts` imports the two files it writes.
 
-```typescript title="src/prisma/db.ts"
+```typescript title="src/prisma/db.ts" tab="MongoDB"
 import "dotenv/config";
 import mongo from "@prisma/orm-mongo/runtime";
 import { contractFromJson } from "@prisma/orm-mongo/static";
@@ -173,7 +431,7 @@ Keep the `contract` value built from `contract.json` and the `Contract` type, an
 
 `dbName` is now the only thing that picks the database, so set it to the database your driver code reads, and `client.db("app")` and Prisma ORM stay on the same one. An empty `dbName` is an error.
 
-```typescript
+```typescript tab="MongoDB"
 import { client, db } from "./prisma/db";
 const session = client.startSession();
 try {
@@ -191,26 +449,27 @@ try {
 const jane = await db.orm.users.where({ email: "jane@prisma.io" }).first();
 ```
 
-On MongoDB there is no schema segment in the path, and the property name is the collection name: the model's `@@map` value, or the model name exactly as written when the model has no `@@map`. The example above assumes a `User` model mapped to the `users` collection, like the one below, so Prisma ORM reads it as `db.orm.users` and the driver code as `database.collection("users")`. Without the `@@map` line it would be `db.orm.User`.
+<Added>
 
-```prisma title="src/prisma/contract.prisma (excerpt)"
-model User {
-  id    ObjectId @id @map("_id")
-  email String   @unique
-  name  String?
-  @@map("users")
-}
-```
+The example uses the models [shown above](#run-writes-in-a-transaction), so Prisma ORM reads the users as `db.orm.users` and the driver code as `database.collection("users")`.
 
-The `id` field has no `@default` because you never pass it: when you insert a document without an `_id`, MongoDB assigns one, and `insertOne` returns it as `insertedId`, which the example uses as the post's `authorId`.
+</Added>
+
+<Added>
+
+The `id` fields have no `@default` because you never pass them: when you insert a document without an `_id`, MongoDB assigns one, and `insertOne` returns it as `insertedId`, which the example uses as the post's `authorId`.
+
+</Added>
 
 Writes you make through the driver skip the type-checking that Prisma ORM queries get, so put each driver transaction in its own small function, and write everything around it as Prisma ORM queries.
+
+</Removed>
 
 ## Coming from Prisma ORM 7
 
 Prisma ORM 8 has no `$transaction`, so both of the Prisma ORM 7 forms become `db.transaction(async (tx) => ...)`. The interactive form maps one for one: rename the method and query through `tx`.
 
-```diff
+```diff tab="PostgreSQL"
 - const result = await prisma.$transaction(async (prisma) => {
 -   const user = await prisma.user.create({ data: { email, name } });
 -   return prisma.post.create({ data: { title, authorId: user.id } });
@@ -222,9 +481,21 @@ Prisma ORM 8 has no `$transaction`, so both of the Prisma ORM 7 forms become `db
 + });
 ```
 
+```diff tab="MongoDB"
+- const result = await prisma.$transaction(async (prisma) => {
+-   const user = await prisma.user.create({ data: { email, name } });
+-   return prisma.post.create({ data: { title, authorId: user.id } });
+- });
++ const result = await db.transaction(async (tx) => {
++   const user = await tx.orm.users.create({ email, name });
++   // published is required and has no default, so you pass it
++   return tx.orm.posts.create({ title, published: false, authorId: user.id });
++ });
+```
+
 The array form has no replacement of its own, so write the queries out in the callback, one after another:
 
-```diff
+```diff tab="PostgreSQL"
 - const [user, post] = await prisma.$transaction([
 -   prisma.user.create({ data: { email, name } }),
 -   prisma.post.create({ data: { title, authorId } }),
@@ -232,6 +503,18 @@ The array form has no replacement of its own, so write the queries out in the ca
 + const { user, post } = await db.transaction(async (tx) => {
 +   const user = await tx.orm.public.User.create({ email, name });
 +   const post = await tx.orm.public.Post.create({ title, published: false, authorId: user.id });
++   return { user, post };
++ });
+```
+
+```diff tab="MongoDB"
+- const [user, post] = await prisma.$transaction([
+-   prisma.user.create({ data: { email, name } }),
+-   prisma.post.create({ data: { title, authorId } }),
+- ]);
++ const { user, post } = await db.transaction(async (tx) => {
++   const user = await tx.orm.users.create({ email, name });
++   const post = await tx.orm.posts.create({ title, published: false, authorId: user.id });
 +   return { user, post };
 + });
 ```
@@ -244,35 +527,67 @@ You get the same atomicity, and you also get what the array form never allowed: 
 
 Sending an email or queueing a job inside the callback looks natural, because it is right next to the write it belongs to:
 
-```typescript
+```typescript tab="PostgreSQL"
 await db.transaction(async (tx) => {
   const user = await tx.orm.public.User.create({ email, name });
   await sendWelcomeEmail(user.email); // runs even if the transaction rolls back
 });
 ```
 
+```typescript tab="MongoDB"
+await db.transaction(async (tx) => {
+  const user = await tx.orm.users.create({ email, name });
+  await sendWelcomeEmail(user.email); // runs even if the transaction rolls back
+});
+```
+
 Database writes roll back; emails don't. If a later statement throws, the record disappears but the email was already sent. Return what you need from the callback, and run the side effect after the transaction has committed:
 
-```typescript
+```typescript tab="PostgreSQL"
 const user = await db.transaction(async (tx) => {
   return tx.orm.public.User.create({ email, name });
 });
 await sendWelcomeEmail(user.email);
 ```
 
+```typescript tab="MongoDB"
+const user = await db.transaction(async (tx) => {
+  return tx.orm.users.create({ email, name });
+});
+await sendWelcomeEmail(user.email);
+```
+
 Now the email can only go out for a user that actually exists.
+
+<Added>
+
+On MongoDB this matters even more, because the driver [retries your callback by default](#your-callback-can-run-more-than-once). A side effect inside it can then happen twice for one committed transaction.
+
+</Added>
 
 ### Querying through db instead of tx
 
 If you open a transaction but keep writing `db.orm` inside the callback:
 
-```typescript
+```typescript tab="PostgreSQL"
 await db.transaction(async (tx) => {
   await db.orm.public.User.create({ email, name }); // outside the transaction
 });
 ```
 
+```typescript tab="MongoDB"
+await db.transaction(async (tx) => {
+  await db.orm.users.create({ email, name }); // outside the transaction
+});
+```
+
 Queries on `db` run on their own connection, outside the open transaction, so they commit immediately and won't roll back with the rest of the callback. Use `tx` for every query inside the callback: `tx.orm` for models, `tx.sql` and `tx.execute` for the SQL query builder.
+
+<Added>
+
+On MongoDB, a write on `db` inside the callback can also stall it. When the write changes a document the transaction has already written, it waits for the transaction to end, while your callback waits for the write. The stall lasts until MongoDB aborts the transaction at its time limit, 60 seconds by default.
+
+</Added>
 
 ## Prompt your coding agent
 
@@ -281,7 +596,7 @@ Projects created with `npm create prisma@latest` include the [Prisma ORM skills]
 - "Using the prisma-8 skill, wrap this signup flow (create user, create welcome post) in a db.transaction so both writes commit together."
 - "Check this transaction callback for queries that use db instead of tx, and move the email send after the commit."
 - "Refactor these two service functions so the helper takes tx as a parameter instead of opening its own transaction."
-- "This project is on MongoDB. Show me the driver-session pattern for an atomic two-collection write with a shared MongoClient."
+- "This project is on MongoDB. <Added inline>Wrap this two-collection write in db.transaction, and move any side effects after the commit, because the driver can run the callback more than once."</Added>
 
 ## Next
 

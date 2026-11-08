@@ -1506,6 +1506,14 @@ Using a driver, a client, or the CLI control client before `connect(...)` has be
 
 A prepared statement failed again after the PostgreSQL driver discarded a stale handle and retried with a fresh handle. The normalized PostgreSQL error is attached as `cause`. Payload: `handle`.
 
+### DRIVER.TRANSACTIONS_UNSUPPORTED [#DRIVER.TRANSACTIONS_UNSUPPORTED]
+
+<Added>
+
+Since `<VERSION>`. A MongoDB `db.transaction(...)` ran against a standalone `mongod`, which rejects the transaction's first command. MongoDB runs transactions only on a replica set member or through `mongos`. MongoDB's own `MongoServerError` (code `20`, "Transaction numbers are only allowed on a replica set member or mongos") is attached as `cause`. For a write, the Node.js driver reports that error as a retryable-writes error that suggests `retryWrites=false`, which does not enable transactions; the `cause` is the server's original error. Connect to a replica set or a sharded cluster, such as MongoDB Atlas, or run the local server as a single-member replica set. See [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+
+</Added>
+
 ## MIGRATION
 
 A migration runner fails with its own code: `MIGRATION.SCHEMA_VERIFY_FAILED`, `MIGRATION.PRECHECK_FAILED`, `MIGRATION.POSTCHECK_FAILED`, `MIGRATION.EXECUTION_FAILED`, `MIGRATION.POLICY_VIOLATION`, `MIGRATION.MARKER_ORIGIN_MISMATCH`, `MIGRATION.MARKER_CAS_FAILURE`, `MIGRATION.DESTINATION_CONTRACT_MISMATCH`, `MIGRATION.FOREIGN_KEY_VIOLATION` or, on MongoDB, `MIGRATION.DATA_TRANSFORM_CHECK_NOT_READ_ONLY`. `db init`, `db update` and `db migrate` report that code, its `why` and its payload unchanged, and add their advice. The payload also carries `failingSpace`, the contract space whose plan failed (`app` for the application's own), and `databaseUnchanged`: `true` when the database is as it was before the apply, `false` when what ran stays applied; creating the marker and ledger tables does not count as a change. Postgres and SQLite, whose DDL is transactional, roll back every failed apply, so it is always `true` there. MySQL and MongoDB apply one space at a time: MySQL commits each DDL statement as it runs and MongoDB does not wrap its operations in a transaction, so it is `false` once an operation, or a space's marker, has been written. The runner's `why` ends with "The failed apply changed nothing." or "The operations that ran before the failure stay applied." to match. When the apply stopped in a space other than the application's, the CLI adds `The apply stopped in contract space "<space>".` to the `why`.
