@@ -1401,7 +1401,7 @@ Update every matching row and collect the results.
 - On PostgreSQL, `updateAll()` runs as one statement, so every matching row changes together.
 - On PostgreSQL, a `limit()`, `offset()`, `cursor()`, `distinct()`, or `distinctOn()` on the collection makes this method throw an error whose `code` is `ORM.ARGUMENT_INVALID`, because it changes every matching row and cannot apply them. An `orderBy()` is accepted. To change only some of the matching rows, read their ids first, then filter on them, as [Writing data](/orm/fundamentals/writing-data#update-or-delete-a-limited-number-of-rows) shows.
 - On MongoDB, `updateAll()` is not a single operation, and two things follow. If a document begins matching your filter while the call is running, it is updated but not included in the returned rows. If someone else changes a matched document while the call is running, you get their version back, not yours.
-- Prisma ORM has no `db.transaction()` on MongoDB, so you cannot avoid this from the client. To control it, share one `MongoClient` with the MongoDB driver and group the writes in one of the driver's own sessions, shown under [Transactions on MongoDB](/orm/fundamentals/transactions#transactions-on-mongodb).
+- <Added inline>To control it, call `updateAll()` on `tx.orm` inside [`db.transaction(...)`](/orm/fundamentals/transactions#transactions-on-mongodb), so the update and the read that returns its rows run in one MongoDB transaction.</Added>
 
 #### Options
 

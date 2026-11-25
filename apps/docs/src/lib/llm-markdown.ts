@@ -606,6 +606,8 @@ export function normalizeProcessedMarkdown(
         formatSectionComponent(attrs, content, "Accordion"),
     )
     .replace(/<\/?Accordions[^>]*>/g, "")
+    // Review-only highlight wrappers (components/added.tsx, removed.tsx); keep the prose.
+    .replace(/<\/?(?:Added|Removed)\b[^>]*>/g, "")
     .replace(/<Step\b([^>]*)>([\s\S]*?)<\/Step>/g, (_match, attrs: string, content: string) =>
       formatSectionComponent(attrs, content, "Step"),
     )
