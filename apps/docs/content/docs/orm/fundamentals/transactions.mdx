@@ -247,7 +247,7 @@ try {
   });
 } catch (error) {
   // Ann was rolled back too
-  if (error instanceof Error && "code" in error && error.code === 11000) {
+  if (typeof error === "object" && error && "code" in error && error.code === 11000) {
     // the email is taken
   }
 }
@@ -273,14 +273,14 @@ await withRetry(() => db.transaction(async (tx) => { /* your writes */ }));
 ```
 
 ```typescript tab="MongoDB"
-import { MongoError } from "mongodb";
-
 async function withRetry<T>(run: () => Promise<T>, attempts = 3): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await run();
     } catch (error) {
-      const transient = error instanceof MongoError && error.hasErrorLabel("TransientTransactionError");
+      const transient =
+        typeof error === "object" && error && "hasErrorLabel" in error &&
+        typeof error.hasErrorLabel === "function" && error.hasErrorLabel("TransientTransactionError");
       if (!transient || attempt === attempts) throw error;
     }
   }
